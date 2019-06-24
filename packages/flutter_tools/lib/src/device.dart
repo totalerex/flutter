@@ -5,8 +5,11 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:meta/meta.dart';
+
 import 'android/android_device.dart';
 import 'application_package.dart';
+import 'artifacts.dart';
 import 'base/context.dart';
 import 'base/file_system.dart';
 import 'base/utils.dart';
@@ -19,11 +22,45 @@ import 'ios/devices.dart';
 import 'ios/simulators.dart';
 import 'linux/linux_device.dart';
 import 'macos/macos_device.dart';
+import 'project.dart';
 import 'tester/flutter_tester.dart';
 import 'web/web_device.dart';
+import 'web/workflow.dart';
 import 'windows/windows_device.dart';
 
-DeviceManager get deviceManager => context[DeviceManager];
+DeviceManager get deviceManager => context.get<DeviceManager>();
+
+/// A description of the kind of workflow the device supports.
+class Category {
+  const Category._(this.value);
+
+  static const Category web = Category._('web');
+  static const Category desktop = Category._('desktop');
+  static const Category mobile = Category._('mobile');
+
+  final String value;
+
+  @override
+  String toString() => value;
+}
+
+/// The platform sub-folder that a device type supports.
+class PlatformType {
+  const PlatformType._(this.value);
+
+  static const PlatformType web = PlatformType._('web');
+  static const PlatformType android = PlatformType._('android');
+  static const PlatformType ios = PlatformType._('ios');
+  static const PlatformType linux = PlatformType._('linux');
+  static const PlatformType macos = PlatformType._('macos');
+  static const PlatformType windows = PlatformType._('windows');
+  static const PlatformType fuchsia = PlatformType._('fuchsia');
+
+  final String value;
+
+  @override
+  String toString() => value;
+}
 
 /// A class to get all available devices.
 class DeviceManager {
@@ -205,9 +242,18 @@ abstract class PollingDeviceDiscovery extends DeviceDiscovery {
 
 abstract class Device {
 
-  Device(this.id);
+  Device(this.id, {@required this.category, @required this.platformType, @required this.ephemeral});
 
   final String id;
+
+  /// The [Category] for this device type.
+  final Category category;
+
+  /// The [PlatformType] for this device.
+  final PlatformType platformType;
+
+  /// Whether this is an ephemeral device.
+  final bool ephemeral;
 
   String get name;
 
@@ -234,6 +280,9 @@ abstract class Device {
         return false;
     }
   }
+
+  /// Whether the device is supported for the current project directory.
+  bool isSupportedForProject(FlutterProject flutterProject);
 
   /// Check if a version of the given app is already installed
   Future<bool> isAppInstalled(ApplicationPackage app);
@@ -270,6 +319,9 @@ abstract class Device {
   /// Clear the device's logs.
   void clearLogs();
 
+  /// Optional device-specific artifact overrides.
+  OverrideArtifacts get artifactOverrides => null;
+
   /// Start an app package on the current device.
   ///
   /// [platformArgs] allows callers to pass platform-specific arguments to the
@@ -298,7 +350,7 @@ abstract class Device {
 
   /// Whether flutter applications running on this device can be terminated
   /// from the vmservice.
-  bool get supportsStopApp => true;
+  bool get supportsFlutterExit => true;
 
   /// Whether the device supports taking screenshots of a running flutter
   /// application.
@@ -367,6 +419,8 @@ class DebuggingOptions {
   DebuggingOptions.enabled(
     this.buildInfo, {
     this.startPaused = false,
+    this.disableServiceAuthCodes = false,
+    this.dartFlags = '',
     this.enableSoftwareRendering = false,
     this.skiaDeterministicRendering = false,
     this.traceSkia = false,
@@ -381,6 +435,8 @@ class DebuggingOptions {
     : debuggingEnabled = false,
       useTestFonts = false,
       startPaused = false,
+      dartFlags = '',
+      disableServiceAuthCodes = false,
       enableSoftwareRendering = false,
       skiaDeterministicRendering = false,
       traceSkia = false,
@@ -393,6 +449,8 @@ class DebuggingOptions {
 
   final BuildInfo buildInfo;
   final bool startPaused;
+  final String dartFlags;
+  final bool disableServiceAuthCodes;
   final bool enableSoftwareRendering;
   final bool skiaDeterministicRendering;
   final bool traceSkia;

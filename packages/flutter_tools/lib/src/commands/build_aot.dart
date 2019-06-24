@@ -28,15 +28,16 @@ class BuildAotCommand extends BuildSubCommand with TargetPlatformBasedDevelopmen
         allowed: <String>['android-arm', 'android-arm64', 'ios'],
       )
       ..addFlag('quiet', defaultsTo: false)
-      ..addFlag('build-shared-library',
-        negatable: false,
-        defaultsTo: false,
-        help: 'Compile to a *.so file (requires NDK when building for Android).',
-      )
       ..addFlag('report-timings',
         negatable: false,
         defaultsTo: false,
         help: 'Report timing information about build steps in machine readable form,',
+      )
+      // track-widget-creation is exposed as a flag here but ignored to deal with build
+      // invalidation issues - there are no plans to support it for AOT mode.
+      ..addFlag('track-widget-creation',
+        defaultsTo: false,
+        hide: true,
       )
       ..addMultiOption('ios-arch',
         splitCommas: true,
@@ -116,7 +117,6 @@ class BuildAotCommand extends BuildSubCommand with TargetPlatformBasedDevelopmen
             mainPath: mainPath,
             packagesPath: PackageMap.globalPackagesPath,
             outputPath: outputPath,
-            buildSharedLibrary: false,
             extraGenSnapshotOptions: argResults[FlutterOptions.kExtraGenSnapshotOptions],
           ).then<int>((int buildExitCode) {
             return buildExitCode;
@@ -146,7 +146,6 @@ class BuildAotCommand extends BuildSubCommand with TargetPlatformBasedDevelopmen
           mainPath: mainPath,
           packagesPath: PackageMap.globalPackagesPath,
           outputPath: outputPath,
-          buildSharedLibrary: argResults['build-shared-library'],
           extraGenSnapshotOptions: argResults[FlutterOptions.kExtraGenSnapshotOptions],
         );
         if (snapshotExitCode != 0) {

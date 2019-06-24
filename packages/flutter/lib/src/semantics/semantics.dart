@@ -565,6 +565,7 @@ class SemanticsProperties extends DiagnosticableTree {
     this.button,
     this.header,
     this.textField,
+    this.readOnly,
     this.focused,
     this.inMutuallyExclusiveGroup,
     this.hidden,
@@ -650,6 +651,13 @@ class SemanticsProperties extends DiagnosticableTree {
   /// TalkBack/VoiceOver provide special affordances to enter text into a
   /// text field.
   final bool textField;
+
+  /// If non-null, indicates that this subtree is read only.
+  ///
+  /// Only applicable when [textField] is true
+  ///
+  /// TalkBack/VoiceOver will treat it as non-editable text field.
+  final bool readOnly;
 
   /// If non-null, whether the node currently holds input focus.
   ///
@@ -1154,6 +1162,7 @@ class SemanticsNode extends AbstractNode with DiagnosticableTreeMixin {
   Rect _rect = Rect.zero;
   set rect(Rect value) {
     assert(value != null);
+    assert(value.isFinite, '$this (with $owner) tried to set a non-finite rect.');
     if (_rect != value) {
       _rect = value;
       _markDirty();
@@ -1274,30 +1283,31 @@ class SemanticsNode extends AbstractNode with DiagnosticableTreeMixin {
     assert(!newChildren.any((SemanticsNode child) => child == this));
     assert(() {
       if (identical(newChildren, _children)) {
-        final StringBuffer mutationErrors = StringBuffer();
+        final List<DiagnosticsNode> mutationErrors = <DiagnosticsNode>[];
         if (newChildren.length != _debugPreviousSnapshot.length) {
-          mutationErrors.writeln(
+          mutationErrors.add(ErrorDescription(
             'The list\'s length has changed from ${_debugPreviousSnapshot.length} '
             'to ${newChildren.length}.'
-          );
+          ));
         } else {
           for (int i = 0; i < newChildren.length; i++) {
             if (!identical(newChildren[i], _debugPreviousSnapshot[i])) {
-              mutationErrors.writeln(
-                'Child node at position $i was replaced:\n'
-                'Previous child: ${newChildren[i]}\n'
-                'New child: ${_debugPreviousSnapshot[i]}\n'
-              );
+              if (mutationErrors.isNotEmpty) {
+                mutationErrors.add(ErrorSpacer());
+              }
+              mutationErrors.add(ErrorDescription('Child node at position $i was replaced:'));
+              mutationErrors.add(newChildren[i].toDiagnosticsNode(name: 'Previous child', style: DiagnosticsTreeStyle.singleLine));
+              mutationErrors.add(_debugPreviousSnapshot[i].toDiagnosticsNode(name: 'New child', style: DiagnosticsTreeStyle.singleLine));
             }
           }
         }
         if (mutationErrors.isNotEmpty) {
-          throw FlutterError(
-            'Failed to replace child semantics nodes because the list of `SemanticsNode`s was mutated.\n'
-            'Instead of mutating the existing list, create a new list containing the desired `SemanticsNode`s.\n'
-            'Error details:\n'
-            '$mutationErrors'
-          );
+          throw FlutterError.fromParts(<DiagnosticsNode>[
+            ErrorSummary('Failed to replace child semantics nodes because the list of `SemanticsNode`s was mutated.'),
+            ErrorHint('Instead of mutating the existing list, create a new list containing the desired `SemanticsNode`s.'),
+            ErrorDescription('Error details:'),
+            ...mutationErrors
+          ]);
         }
       }
       assert(!newChildren.any((SemanticsNode node) => node.isMergedIntoParent) || isPartOfNodeMerging);
@@ -1949,12 +1959,12 @@ class SemanticsNode extends AbstractNode with DiagnosticableTreeMixin {
       textDirection: data.textDirection,
       textSelectionBase: data.textSelection != null ? data.textSelection.baseOffset : -1,
       textSelectionExtent: data.textSelection != null ? data.textSelection.extentOffset : -1,
-      platformViewId: data.platformViewId != null ? data.platformViewId : -1,
-      scrollChildren: data.scrollChildCount != null ? data.scrollChildCount : 0,
-      scrollIndex: data.scrollIndex != null ? data.scrollIndex : 0 ,
-      scrollPosition: data.scrollPosition != null ? data.scrollPosition : double.nan,
-      scrollExtentMax: data.scrollExtentMax != null ? data.scrollExtentMax : double.nan,
-      scrollExtentMin: data.scrollExtentMin != null ? data.scrollExtentMin : double.nan,
+      platformViewId: data.platformViewId ?? -1,
+      scrollChildren: data.scrollChildCount ?? 0,
+      scrollIndex: data.scrollIndex ?? 0 ,
+      scrollPosition: data.scrollPosition ?? double.nan,
+      scrollExtentMax: data.scrollExtentMax ?? double.nan,
+      scrollExtentMin: data.scrollExtentMin ?? double.nan,
       transform: data.transform?.storage ?? _kIdentityTransform,
       elevation: data.elevation,
       thickness: data.thickness,
@@ -2048,6 +2058,7 @@ class SemanticsNode extends AbstractNode with DiagnosticableTreeMixin {
 
   @override
   void debugFillProperties(DiagnosticPropertiesBuilder properties) {
+    super.debugFillProperties(properties);
     bool hideOwner = true;
     if (_dirty) {
       final bool inDirtyNodes = owner != null && owner._dirtyNodes.contains(this);
@@ -2097,7 +2108,7 @@ class SemanticsNode extends AbstractNode with DiagnosticableTreeMixin {
     properties.add(DoubleProperty('scrollPosition', scrollPosition, defaultValue: null));
     properties.add(DoubleProperty('scrollExtentMax', scrollExtentMax, defaultValue: null));
     properties.add(DoubleProperty('elevation', elevation, defaultValue: 0.0));
-    properties.add(DoubleProperty('thicknes', thickness, defaultValue: 0.0));
+    properties.add(DoubleProperty('thickness', thickness, defaultValue: 0.0));
   }
 
   /// Returns a string representation of this node and its descendants.
@@ -2168,6 +2179,7 @@ class _BoxEdge implements Comparable<_BoxEdge> {
     @required this.node,
   }) : assert(isLeadingEdge != null),
        assert(offset != null),
+       assert(offset.isFinite),
        assert(node != null);
 
   /// True if the edge comes before the seconds edge along the traversal
@@ -2374,6 +2386,7 @@ Offset _pointInParentCoordinates(SemanticsNode node, Offset point) {
 List<SemanticsNode> _childrenInDefaultOrder(List<SemanticsNode> children, TextDirection textDirection) {
   final List<_BoxEdge> edges = <_BoxEdge>[];
   for (SemanticsNode child in children) {
+    assert(child.rect.isFinite);
     // Using a small delta to shrink child rects removes overlapping cases.
     final Rect childRect = child.rect.deflate(0.1);
     edges.add(_BoxEdge(
@@ -3031,7 +3044,8 @@ class SemanticsConfiguration {
   set onSetSelection(SetSelectionHandler value) {
     assert(value != null);
     _addAction(SemanticsAction.setSelection, (dynamic args) {
-      final Map<String, int> selection = args;
+      assert(args != null && args is Map);
+      final Map<String, int> selection = args.cast<String, int>();
       assert(selection != null && selection['base'] != null && selection['extent'] != null);
       value(TextSelection(
         baseOffset: selection['base'],
@@ -3502,6 +3516,14 @@ class SemanticsConfiguration {
   bool get isTextField => _hasFlag(SemanticsFlag.isTextField);
   set isTextField(bool value) {
     _setFlag(SemanticsFlag.isTextField, value);
+  }
+
+  /// Whether the owning [RenderObject] is read only.
+  ///
+  /// Only applicable when [isTextField] is true.
+  bool get isReadOnly => _hasFlag(SemanticsFlag.isReadOnly);
+  set isReadOnly(bool value) {
+    _setFlag(SemanticsFlag.isReadOnly, value);
   }
 
   /// Whether the [value] should be obscured.

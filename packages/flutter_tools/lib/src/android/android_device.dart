@@ -14,6 +14,7 @@ import '../base/common.dart' show throwToolExit;
 import '../base/file_system.dart';
 import '../base/io.dart';
 import '../base/logger.dart';
+import '../base/platform.dart';
 import '../base/process.dart';
 import '../base/process_manager.dart';
 import '../build_info.dart';
@@ -42,6 +43,13 @@ const Map<String, _HardwareType> _knownHardware = <String, _HardwareType>{
   'samsungexynos9810': _HardwareType.physical,
 };
 
+bool allowHeapCorruptionOnWindows(int exitCode) {
+  // In platform tools 29.0.0 adb.exe seems to be ending with this heap
+  // corruption error code on seemingly successful termination.
+  // So we ignore this error on Windows.
+  return exitCode == -1073740940 && platform.isWindows;
+}
+
 class AndroidDevices extends PollingDeviceDiscovery {
   AndroidDevices() : super('Android devices');
 
@@ -64,7 +72,12 @@ class AndroidDevice extends Device {
     this.productID,
     this.modelID,
     this.deviceCodeName,
-  }) : super(id);
+  }) : super(
+      id,
+      category: Category.mobile,
+      platformType: PlatformType.android,
+      ephemeral: true,
+  );
 
   final String productID;
   final String modelID;
@@ -89,10 +102,10 @@ class AndroidDevice extends Device {
           stdoutEncoding: latin1,
           stderrEncoding: latin1,
         );
-        if (result.exitCode == 0) {
+        if (result.exitCode == 0 || allowHeapCorruptionOnWindows(result.exitCode)) {
           _properties = parseAdbDeviceProperties(result.stdout);
         } else {
-          printError('Error retrieving device properties for $name:');
+          printError('Error ${result.exitCode} retrieving device properties for $name:');
           printError(result.stderr);
         }
       } on ProcessException catch (error) {
@@ -157,6 +170,28 @@ class AndroidDevice extends Device {
 
   List<String> adbCommandForDevice(List<String> args) {
     return <String>[getAdbPath(androidSdk), '-s', id]..addAll(args);
+  }
+
+  String runAdbCheckedSync(
+      List<String> params, {
+        String workingDirectory,
+        bool allowReentrantFlutter = false,
+        Map<String, String> environment}) {
+    return runCheckedSync(adbCommandForDevice(params), workingDirectory: workingDirectory,
+        allowReentrantFlutter: allowReentrantFlutter,
+        environment: environment,
+        whiteListFailures: allowHeapCorruptionOnWindows
+    );
+  }
+
+  Future<RunResult> runAdbCheckedAsync(
+      List<String> params, {
+        String workingDirectory,
+        bool allowReentrantFlutter = false,
+      }) async {
+    return runCheckedAsync(adbCommandForDevice(params), workingDirectory: workingDirectory,
+        allowReentrantFlutter: allowReentrantFlutter,
+        whiteListFailures: allowHeapCorruptionOnWindows);
   }
 
   bool _isValidAdbVersion(String adbVersion) {
@@ -252,7 +287,7 @@ class AndroidDevice extends Device {
   Future<bool> isAppInstalled(ApplicationPackage app) async {
     // This call takes 400ms - 600ms.
     try {
-      final RunResult listOut = await runCheckedAsync(adbCommandForDevice(<String>['shell', 'pm', 'list', 'packages', app.id]));
+      final RunResult listOut = await runAdbCheckedAsync(<String>['shell', 'pm', 'list', 'packages', app.id]);
       return LineSplitter.split(listOut.stdout).contains('package:${app.id}');
     } catch (error) {
       printTrace('$error');
@@ -294,9 +329,9 @@ class AndroidDevice extends Device {
       return false;
     }
 
-    await runCheckedAsync(adbCommandForDevice(<String>[
+    await runAdbCheckedAsync(<String>[
       'shell', 'echo', '-n', _getSourceSha1(app), '>', _getDeviceSha1Path(app),
-    ]));
+    ]);
     return true;
   }
 
@@ -361,27 +396,47 @@ class AndroidDevice extends Device {
     final TargetPlatform devicePlatform = await targetPlatform;
     if (!(devicePlatform == TargetPlatform.android_arm ||
           devicePlatform == TargetPlatform.android_arm64) &&
-        !(debuggingOptions.buildInfo.isDebug ||
-          debuggingOptions.buildInfo.isDynamic)) {
+        !debuggingOptions.buildInfo.isDebug) {
       printError('Profile and release builds are only supported on ARM targets.');
       return LaunchResult.failed();
     }
 
-    BuildInfo buildInfo = debuggingOptions.buildInfo;
-    if (buildInfo.targetPlatform == null && devicePlatform == TargetPlatform.android_arm64)
-      buildInfo = buildInfo.withTargetPlatform(TargetPlatform.android_arm64);
+    AndroidArch androidArch;
+    switch (devicePlatform) {
+      case TargetPlatform.android_arm:
+        androidArch = AndroidArch.armeabi_v7a;
+        break;
+      case TargetPlatform.android_arm64:
+        androidArch = AndroidArch.arm64_v8a;
+        break;
+      case TargetPlatform.android_x64:
+        androidArch = AndroidArch.x86_64;
+        break;
+      case TargetPlatform.android_x86:
+        androidArch = AndroidArch.x86;
+        break;
+      default:
+        printError('Android platforms are only supported.');
+        return LaunchResult.failed();
+    }
 
     if (!prebuiltApplication || androidSdk.licensesAvailable && androidSdk.latestVersion == null) {
       printTrace('Building APK');
-      final FlutterProject project = await FlutterProject.current();
+      final FlutterProject project = FlutterProject.current();
       await buildApk(
           project: project,
           target: mainPath,
-          buildInfo: buildInfo,
+          androidBuildInfo: AndroidBuildInfo(debuggingOptions.buildInfo,
+            targetArchs: <AndroidArch>[androidArch]
+          ),
       );
       // Package has been built, so we can get the updated application ID and
       // activity name from the .apk.
       package = await AndroidApk.fromAndroidProject(project.android);
+    }
+    // There was a failure parsing the android project information.
+    if (package == null) {
+      throwToolExit('Problem building Android application: see above error(s).');
     }
 
     printTrace("Stopping app '${package.name}' on $name.");
@@ -409,13 +464,13 @@ class AndroidDevice extends Device {
 
     List<String> cmd;
 
-    cmd = adbCommandForDevice(<String>[
+    cmd = <String>[
       'shell', 'am', 'start',
       '-a', 'android.intent.action.RUN',
       '-f', '0x20000000', // FLAG_ACTIVITY_SINGLE_TOP
       '--ez', 'enable-background-compilation', 'true',
       '--ez', 'enable-dart-profiling', 'true',
-    ]);
+    ];
 
     if (traceStartup)
       cmd.addAll(<String>['--ez', 'trace-startup', 'true']);
@@ -438,6 +493,10 @@ class AndroidDevice extends Device {
       }
       if (debuggingOptions.startPaused)
         cmd.addAll(<String>['--ez', 'start-paused', 'true']);
+      if (debuggingOptions.disableServiceAuthCodes)
+        cmd.addAll(<String>['--ez', 'disable-service-auth-codes', 'true']);
+      if (debuggingOptions.dartFlags.isNotEmpty)
+        cmd.addAll(<String>['--es', 'dart-flags', debuggingOptions.dartFlags]);
       if (debuggingOptions.useTestFonts)
         cmd.addAll(<String>['--ez', 'use-test-fonts', 'true']);
       if (debuggingOptions.verboseSystemLogs) {
@@ -445,7 +504,7 @@ class AndroidDevice extends Device {
       }
     }
     cmd.add(apk.launchActivity);
-    final String result = (await runCheckedAsync(cmd)).stdout;
+    final String result = (await runAdbCheckedAsync(cmd)).stdout;
     // This invocation returns 0 even when it fails.
     if (result.contains('Error: ')) {
       printError(result.trim(), wrap: false);
@@ -485,7 +544,8 @@ class AndroidDevice extends Device {
   @override
   Future<bool> stopApp(ApplicationPackage app) {
     final List<String> command = adbCommandForDevice(<String>['shell', 'am', 'force-stop', app.id]);
-    return runCommandAndStreamOutput(command).then<bool>((int exitCode) => exitCode == 0);
+    return runCommandAndStreamOutput(command).then<bool>(
+        (int exitCode) => exitCode == 0 || allowHeapCorruptionOnWindows(exitCode));
   }
 
   @override
@@ -508,9 +568,9 @@ class AndroidDevice extends Device {
   /// Return the most recent timestamp in the Android log or null if there is
   /// no available timestamp. The format can be passed to logcat's -T option.
   String get lastLogcatTimestamp {
-    final String output = runCheckedSync(adbCommandForDevice(<String>[
+    final String output = runAdbCheckedSync(<String>[
       'shell', '-x', 'logcat', '-v', 'time', '-t', '1',
-    ]));
+    ]);
 
     final Match timeMatch = _timeRegExp.firstMatch(output);
     return timeMatch?.group(0);
@@ -525,9 +585,14 @@ class AndroidDevice extends Device {
   @override
   Future<void> takeScreenshot(File outputFile) async {
     const String remotePath = '/data/local/tmp/flutter_screenshot.png';
-    await runCheckedAsync(adbCommandForDevice(<String>['shell', 'screencap', '-p', remotePath]));
+    await runAdbCheckedAsync(<String>['shell', 'screencap', '-p', remotePath]);
     await runCheckedAsync(adbCommandForDevice(<String>['pull', remotePath, outputFile.path]));
-    await runCheckedAsync(adbCommandForDevice(<String>['shell', 'rm', remotePath]));
+    await runAdbCheckedAsync(<String>['shell', 'rm', remotePath]);
+  }
+
+  @override
+  bool isSupportedForProject(FlutterProject flutterProject) {
+    return flutterProject.android.existsSync();
   }
 }
 
@@ -874,7 +939,20 @@ class _AndroidDevicePortForwarder extends DevicePortForwarder {
         process.throwException('adb did not report forwarded port');
       hostPort = int.tryParse(process.stdout) ?? (throw 'adb returned invalid port number:\n${process.stdout}');
     } else {
-      if (process.stdout.isNotEmpty)
+      // stdout may be empty or the port we asked it to forward, though it's
+      // not documented (or obvious) what triggers each case.
+      //
+      // Observations are:
+      //   - On MacOS it's always empty when Flutter spawns the process, but
+      //   - On MacOS it prints the port number when run from the terminal, unless
+      //     the port is already forwarded, when it also prints nothing.
+      //   - On ChromeOS, the port appears to be printed even when Flutter spawns
+      //     the process
+      //
+      // To cover all cases, we accept the output being either empty or exactly
+      // the port number, but treat any other output as probably being an error
+      // message.
+      if (process.stdout.isNotEmpty && process.stdout.trim() != '$hostPort')
         process.throwException('adb returned error:\n${process.stdout}');
     }
 
