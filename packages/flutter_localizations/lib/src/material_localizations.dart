@@ -564,7 +564,7 @@ class _MaterialLocalizationsDelegate extends LocalizationsDelegate<MaterialLocal
   Future<MaterialLocalizations> load(Locale locale) {
     assert(isSupported(locale));
     return _loadedTranslations.putIfAbsent(locale, () {
-      util.loadDateIntlDataIfNotLoaded();
+      //util.loadDateIntlDataIfNotLoaded();
 
       final String localeName = intl.Intl.canonicalizedLocale(locale.toString());
       assert(
